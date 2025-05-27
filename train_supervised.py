@@ -143,7 +143,7 @@ class CARLADrivingDataset(Dataset):
         
         return image, state, action, lidar
 
-def create_data_loaders(data_dir, batch_size=32, val_split=0.2, use_lidar=True):
+def create_data_loaders(data_dir, batch_size=8, val_split=0.2, use_lidar=True):
     """Create training and validation data loaders"""
     
     # Find all data files
@@ -227,7 +227,7 @@ def validate_model(model, val_loader, device, use_lidar=True):
     
     return avg_loss, avg_steering_error, avg_throttle_error, avg_brake_error
 
-def train_supervised_model(data_dir, epochs=100, batch_size=32, learning_rate=0.001, 
+def train_supervised_model(data_dir, epochs=100, batch_size=8, learning_rate=0.001, 
                           use_lidar=True, save_interval=10):
     """Train the Vision Transformer model with supervised learning"""
     
@@ -239,11 +239,10 @@ def train_supervised_model(data_dir, epochs=100, batch_size=32, learning_rate=0.
     
     # Create data loaders
     train_loader, val_loader = create_data_loaders(data_dir, batch_size, use_lidar=use_lidar)
-    
-    # Create model
+      # Create model
     model_config = {
-        'img_size': 84,
-        'patch_size': 16 if use_lidar else 14,  # Adjust for better patch alignment
+        'img_size': 224,  # Updated for high-quality camera
+        'patch_size': 16,  # Optimal patch size for 224x224
         'embed_dim': 512,
         'depth': 6,
         'num_heads': 8,
@@ -371,8 +370,8 @@ def main():
                        help='Directory containing training data')
     parser.add_argument('--epochs', type=int, default=100,
                        help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=32,
-                       help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=8,
+                       help='Batch size for training (optimized for VRAM)')
     parser.add_argument('--learning_rate', type=float, default=0.001,
                        help='Learning rate for optimizer')
     parser.add_argument('--no_lidar', action='store_true',

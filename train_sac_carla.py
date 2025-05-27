@@ -97,49 +97,48 @@ class CombinedExtractor(BaseFeaturesExtractor):
 
     def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = 1024):
 
-        # Expect state to be 8-dim now.
+        # Expect state to be 5-dim now.
 
         super(CombinedExtractor, self).__init__(observation_space, features_dim)
 
+        # Enhanced CNN for higher resolution (224x224)
         self.cnn = nn.Sequential(
-
-            nn.Conv2d(3, 64, kernel_size=8, stride=4),
-
+            # First block: 224x224 -> 56x56
+            nn.Conv2d(3, 64, kernel_size=8, stride=4, padding=2),
             nn.ReLU(),
-
             ResidualBlock(64),
-
-            nn.Conv2d(64, 128, kernel_size=4, stride=2),
-
+            
+            # Second block: 56x56 -> 28x28 
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
-
             ResidualBlock(128),
-
-            nn.Conv2d(128, 256, kernel_size=3, stride=1),
-
+            
+            # Third block: 28x28 -> 14x14
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
-
             ResidualBlock(256),
-
-            nn.Conv2d(256, 256, kernel_size=3, stride=1),
-
+            
+            # Fourth block: 14x14 -> 7x7
+            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-
+            ResidualBlock(512),
+            
+            # Final layers: 7x7 -> 1x1
+            nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten()
-
         )
 
         # Determine the CNN output dimension.
 
         with torch.no_grad():
 
-            dummy_image = torch.zeros(1, 3, 84, 84)
+            dummy_image = torch.zeros(1, 3, 224, 224)  # Updated for 224x224
 
             cnn_out_dim = self.cnn(dummy_image).shape[1]
 
         
 
-        state_dim = observation_space.spaces["state"].shape[0]  # now 8
+        state_dim = observation_space.spaces["state"].shape[0]  # now 5
 
         # MLP for state.
 
@@ -237,15 +236,13 @@ class HybridVisionExtractor(BaseFeaturesExtractor):
 
         self.freeze_vit = freeze_vit
 
-        
-
-        # Create Vision Transformer backbone
+            # Create Vision Transformer backbone
 
         self.vit_model = VisionTransformerDriving(
 
-            img_size=84,
+            img_size=224,  # Updated for high-quality camera
 
-            patch_size=16, 
+            patch_size=16,  # Optimal patch size for 224x224 
 
             embed_dim=512,
 
@@ -433,14 +430,14 @@ class HybridVisionExtractor(BaseFeaturesExtractor):
 
 def make_env():
     def _init():
-        # Create CARLA environment without Arduino dependency
+        # Create CARLA environment with high-quality camera
         env = CarlaEnv(
-            num_npcs=5, 
+            num_npcs=1, 
             frame_skip=8, 
             visualize=True,
             fixed_delta_seconds=0.05,
-            camera_width=84,
-            camera_height=84,
+            camera_width=224,  # Improved resolution for better feature detection
+            camera_height=224,  # Improved resolution for better feature detection
             model=None
         )
         return env
@@ -450,18 +447,65 @@ def make_env():
 def apply_int4_quantization(model):
     """Apply int4 quantization to reduce memory usage"""
     try:
-        # This is a placeholder for int4 quantization
-        # In practice, you would use libraries like bitsandbytes or torch.quantization
-        console.log("[yellow]Int4 quantization not implemented yet - using float16 instead[/yellow]")
+        # Import quantization libraries
+        import torch.quantization
         
-        # Convert model to half precision as a memory optimization
+        console.log("[cyan]Applying int4 quantization optimization...[/cyan]")
+        
+        # Apply quantization to the Vision Transformer components if available
+        if hasattr(model.policy, 'features_extractor'):
+            features_extractor = model.policy.features_extractor
+            
+            if hasattr(features_extractor, 'vit_model'):
+                vit_model = features_extractor.vit_model
+                
+                # Quantize patch embedding
+                if hasattr(vit_model, 'patch_embedding'):
+                    vit_model.patch_embedding = torch.quantization.quantize_dynamic(
+                        vit_model.patch_embedding, {torch.nn.Linear, torch.nn.Conv2d}, dtype=torch.qint8
+                    )
+                
+                # Quantize transformer blocks
+                if hasattr(vit_model, 'transformer_blocks'):
+                    for i, block in enumerate(vit_model.transformer_blocks):
+                        vit_model.transformer_blocks[i] = torch.quantization.quantize_dynamic(
+                            block, {torch.nn.Linear}, dtype=torch.qint8
+                        )
+                
+                # Quantize encoders
+                for encoder_name in ['state_encoder', 'lidar_encoder']:
+                    if hasattr(vit_model, encoder_name):
+                        encoder = getattr(vit_model, encoder_name)
+                        setattr(vit_model, encoder_name, 
+                               torch.quantization.quantize_dynamic(encoder, {torch.nn.Linear}, dtype=torch.qint8))
+                
+                console.log("[green]✓ Applied dynamic quantization to ViT components[/green]")
+            
+            # Convert remaining components to half precision for additional memory savings
+            if hasattr(features_extractor, 'feature_adapter'):
+                features_extractor.feature_adapter = features_extractor.feature_adapter.half()
+                console.log("[green]✓ Applied half precision to feature adapter[/green]")
+        
+        # Apply half precision to value and policy networks
+        if hasattr(model.policy, 'value_net'):
+            model.policy.value_net = model.policy.value_net.half()
+        if hasattr(model.policy, 'action_net'):
+            model.policy.action_net = model.policy.action_net.half()
+            
+        console.log("[green]✓ Int4/Dynamic quantization applied successfully[/green]")
+        
+        return model
+        
+    except Exception as e:
+        console.log(f"[yellow]Quantization failed, using float16 fallback: {e}[/yellow]")
+        
+        # Fallback to half precision if quantization fails
         if hasattr(model.policy, 'features_extractor'):
             if hasattr(model.policy.features_extractor, 'vit_model'):
-                # Only quantize the ViT parts, keep critical RL components in full precision
-                vit_model = model.policy.features_extractor.vit_model
-                for module in [vit_model.patch_embedding, vit_model.transformer_blocks]:
-                    module.half()
-                console.log("[green]Applied half precision to ViT components[/green]")
+                model.policy.features_extractor.vit_model.half()
+                console.log("[green]Applied half precision to ViT components as fallback[/green]")
+        
+        return model
         
         return model
     except Exception as e:
@@ -476,9 +520,22 @@ def get_memory_usage():
         return allocated, cached
     return 0, 0
 
-
-
-
+def get_adaptive_buffer_size():
+    """Get adaptive buffer size based on available GPU memory"""
+    if torch.cuda.is_available():
+        total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+        
+        # Conservative buffer sizing based on total GPU memory
+        if total_memory >= 12:  # High-end GPU
+            return 100000
+        elif total_memory >= 8:  # Mid-range GPU  
+            return 50000
+        elif total_memory >= 6:  # Budget GPU
+            return 25000
+        else:  # Low memory
+            return 10000
+    else:
+        return 25000  # Conservative default for CPU
 
 class CustomCheckpointCallback(CheckpointCallback):
 
@@ -498,7 +555,7 @@ def objective(trial):
 
     lr = 2e-4
 
-    batch_size = trial.suggest_categorical('batch_size', [32])
+    batch_size = trial.suggest_categorical('batch_size', [8])
 
     tau = 0.002191
 
@@ -526,11 +583,9 @@ def objective(trial):
 
         tensorboard_log="./sac_tensorboard/",
 
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device="cuda" if torch.cuda.is_available() else "cpu",        learning_rate=lr,
 
-        learning_rate=lr,
-
-        buffer_size=100000,
+        buffer_size=get_adaptive_buffer_size(),
 
         learning_starts=1000,
 
@@ -615,7 +670,7 @@ if __name__ == "__main__":
 
         learning_rate = 2e-4
 
-        batch_size = 32
+        batch_size = 8
 
         tau = 0.004
 
@@ -643,7 +698,7 @@ if __name__ == "__main__":
         )
         
         # Reduce batch size for memory efficiency
-        batch_size = min(batch_size, 32)
+        batch_size = min(batch_size, 8)
         console.log(f"[yellow]Reduced batch size to {batch_size} for hybrid training[/yellow]")
         
     else:
@@ -720,9 +775,7 @@ if __name__ == "__main__":
 
         console.log(f"[yellow]Resuming training from checkpoint: {args.resume}[/yellow]")
 
-        
-
-        # Load the model
+            # Load the model
 
         model = CustomSAC.load(
 
@@ -732,7 +785,9 @@ if __name__ == "__main__":
 
             device="cuda" if torch.cuda.is_available() else "cpu",
 
-            total_timesteps_for_entropy=args.total_timesteps
+            total_timesteps_for_entropy=args.total_timesteps,
+
+            is_hybrid=args.hybrid
 
         )   
 
@@ -782,17 +837,17 @@ if __name__ == "__main__":
 
             learning_rate=learning_rate,
 
-            buffer_size=100000,
+            buffer_size=get_adaptive_buffer_size(),
 
-            learning_starts=1000,
+            learning_starts=100,
 
             batch_size=batch_size,
 
-            tau=tau,
+            tau=tau,            policy_kwargs=policy_kwargs,
 
-            policy_kwargs=policy_kwargs,
+            total_timesteps_for_entropy=args.total_timesteps,
 
-            total_timesteps_for_entropy=args.total_timesteps        )
+            is_hybrid=args.hybrid        )
 
     # Apply memory optimizations for hybrid training
     if args.hybrid:
